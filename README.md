@@ -11,6 +11,10 @@ Patches for the [PowerTune Digital](https://github.com/PowerTuneDigital/PowerTun
 Unofficial; not affiliated with PowerTune Digital or Motorsport Electronics. Use at your own risk,
 and test on the bench first. Licensed GPL-3, like the PowerTune source it modifies (see `LICENSE`).
 
+> **No warranty - use at your own risk.** This changes how your ECU gets vehicle speed. Test on the
+> bench and parked first; it may affect your dash warranty or support. Credits to the PowerTune authors
+> and the full warning: [NOTICE.md](NOTICE.md).
+
 The patches are made against the source the dash had on 2026-10-17
 (`/home/pi/src`, a git checkout of PowerTuneDigital/PowerTuneDigitalOfficial, commit `5380ce2`).
 
