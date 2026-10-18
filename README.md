@@ -17,7 +17,7 @@ The patches are made against the source the dash had on 2026-10-17
 | Patch | What it does |
 |---|---|
 | `patches/0001-update-button-custom-firmware-warning.patch` | Settings → Network: orange "CUSTOM FW" next to Update; Update needs a second, separate tap within 5 s (tested in the emulator) |
-| `patches/0002-gps-speed-time-on-can.patch` | GPS speed to the ME442 on `0x340` (its vehicle-speed input), plus speed + UTC time on `0x6A0`, at the GPS rate (10 Hz) (tested in the emulator) |
+| `patches/0002-gps-speed-time-on-can.patch` | GPS speed to the ME442 on `0x340` (its vehicle-speed input), plus speed + UTC time on `0x6A0`, at the GPS rate (10 Hz). **Road-tested in the car**: the ME442 reads the GPS speed (also tested in the emulator) |
 
 `src/` holds the edited files for reading; the patches are what gets applied.
 
@@ -68,4 +68,4 @@ look like the car stopped (gear detection, launch control). Check what the ME442
 | 7 | satellites in view |
 
 In emulator builds the patch also takes NMEA from UDP 45455 and prints frames to UDP 45460 instead of can0
-(`emulator/fake_gps.py`, `emulator/can_monitor.py`).
+(used with a Windows build of the app for testing; the emulator tools are not in this repo).
