@@ -1,0 +1,160 @@
+diff --git a/gps.h b/gps.h
+index d795336..4c88131 100644
+--- a/gps.h
++++ b/gps.h
+@@ -2,6 +2,8 @@
+ #define GPS_H_
+ #include <QElapsedTimer>
+ #include <QTimer>
++#include <QCanBusDevice>
++#include <QUdpSocket>
+ 
+ #include "serialport.h"
+ 
+@@ -22,6 +24,13 @@ class GPS : public QObject
+  private:
+     DashBoard *m_dashboard;
+     SerialPort *m_serialport;
++    // CUSTOM FIRMWARE: GPS speed/time out on CAN (see sendGpsCan in gps.cpp)
++    QCanBusDevice *m_canOut = nullptr;
++    QUdpSocket *m_emuCanOut = nullptr;   // emulator (Windows): frames go to UDP 45460 instead of can0
++    QUdpSocket *m_emuGpsIn = nullptr;    // emulator (Windows): NMEA arrives on UDP 45455
++    void sendGpsCan(double kph, const QString &utc, bool valid);
++    QByteArray gpsFrame(double kph, const QString &utc, bool valid);
++    void sendCanFrame(quint32 id, const QByteArray &payload);
+     QByteArray  m_readData;
+     QByteArray  m_buffer;
+     QElapsedTimer m_timer;
+@@ -54,6 +63,7 @@ class GPS : public QObject
+     void handleReconnect();
+     void handleError(QSerialPort::SerialPortError error);
+     void initSerialPort();
++    void readEmulatorGps();
+     void logNMEA(const QString & line);
+ 
+  signals:
+diff --git a/gps.cpp b/gps.cpp
+index d8b98c9..9a422a1 100644
+--- a/gps.cpp
++++ b/gps.cpp
+@@ -3,6 +3,11 @@
+ #include <QTime>
+ #include <QTimer>
+ 
++#include <QCanBus>
++#include <QCanBusFrame>
++#include <QNetworkDatagram>
++#include <QVariant>
++
+ #include "gps.h"
+ #include "ptpaths.h"
+ #include "dashboard.h"
+@@ -58,6 +63,100 @@ GPS::GPS(DashBoard *dashboard, QObject *parent)
+     : QObject(parent)
+     , m_dashboard(dashboard)
+ {
++#ifdef Q_OS_WIN
++    // EMULATOR: no GPS module on the PC, so also accept NMEA sentences on UDP 45455
++    // (emulator/fake_gps.py). They go through the same ProcessMessage() as the serial port.
++    m_emuGpsIn = new QUdpSocket(this);
++    m_emuGpsIn->bind(QHostAddress::LocalHost, 45455);
++    connect(m_emuGpsIn, &QUdpSocket::readyRead, this, &GPS::readEmulatorGps);
++#endif
++}
++
++void GPS::readEmulatorGps()
++{
++    rateset10hz = 1;   // no module to configure: skip setGPS10HZ(), which writes to the serial port
++    while (m_emuGpsIn && m_emuGpsIn->hasPendingDatagrams()) {
++        const QByteArray data = m_emuGpsIn->receiveDatagram().data();
++        for (const QByteArray &l : data.split('\n'))
++            if (l.trimmed().startsWith("$G"))
++                ProcessMessage(l.trimmed() + "\r\n");
++    }
++}
++
++// CUSTOM FIRMWARE: broadcast GPS speed and UTC time on CAN, id 0x6A0, 8 bytes:
++//   bytes 0-1  speed, km/h x 100 (little endian)   byte 5  hundredths of a second
++//   byte  2    UTC hours                           byte 6  1 = GPS fix valid, 0 = no fix
++//   byte  3    UTC minutes                         byte 7  satellites in view
++//   byte  4    UTC seconds
++// With no fix the speed is sent as 0.
++//
++// Also, ME442 vehicle-speed input (ME1_4.dbc, ME1_In_1): id 0x340, 8 bytes,
++//   bytes 0-1  Vehicle_Speed, km/h / 0.008 (little endian), rest 0
++// MEITE has Driven and Undriven Speed Source = CAN. Sent only with a valid fix: a false 0 km/h
++// at speed could upset gear detection or launch control, a missing frame can be detected.
++//
++// On the dash the frames go out on can0 (same bus as the ECU); in the Windows emulator they are
++// sent as candump-style text "6A0#..." to UDP 127.0.0.1:45460.
++void GPS::sendGpsCan(double kph, const QString &utc, bool valid)
++{
++    sendCanFrame(0x6A0, gpsFrame(kph, utc, valid));
++    if (valid) {
++        const quint16 vss = quint16(qBound(0.0, kph / 0.008 + 0.5, 65535.0));
++        QByteArray me(8, 0);
++        me[0] = char(vss & 0xFF);
++        me[1] = char(vss >> 8);
++        sendCanFrame(0x340, me);
++    }
++}
++
++QByteArray GPS::gpsFrame(double kph, const QString &utc, bool valid)
++{
++    const quint16 speed = valid ? quint16(qBound(0.0, kph * 100.0 + 0.5, 65535.0)) : 0;
++    QByteArray p(8, 0);
++    p[0] = char(speed & 0xFF);
++    p[1] = char(speed >> 8);
++    p[2] = char(utc.mid(0, 2).toInt());
++    p[3] = char(utc.mid(2, 2).toInt());
++    p[4] = char(utc.mid(4, 2).toInt());
++    p[5] = char(utc.mid(7, 2).toInt());
++    p[6] = char(valid ? 1 : 0);
++    p[7] = char(qBound(0, m_dashboard->gpsVisibleSatelites(), 255));
++    return p;
++}
++
++void GPS::sendCanFrame(quint32 id, const QByteArray &payload)
++{
++#ifdef Q_OS_WIN
++    if (!m_emuCanOut)
++        m_emuCanOut = new QUdpSocket(this);
++    const QByteArray text = QByteArray::number(id, 16).toUpper().rightJustified(3, '0') + "#" + payload.toHex().toUpper();
++    m_emuCanOut->writeDatagram(text, QHostAddress::LocalHost, 45460);   // can_monitor.py
++    m_emuCanOut->writeDatagram(text, QHostAddress::LocalHost, 45461);   // fake_me442.py (the "ECU")
++#else
++    if (!m_canOut) {
++        QString err;
++        m_canOut = QCanBus::instance()->createDevice("socketcan", "can0", &err);
++        if (!m_canOut)
++            return;                     // try again on the next GPS update
++        // Send-only: Qt queues every received frame until read, and the ECU sends hundreds a
++        // second. Accept only an extended id nothing uses, and drain whatever still arrives.
++        QCanBusDevice::Filter none;
++        none.frameId = 0x1FFFFFFFu;
++        none.frameIdMask = 0x1FFFFFFFu;
++        none.type = QCanBusFrame::DataFrame;
++        none.format = QCanBusDevice::Filter::MatchExtendedFormat;
++        m_canOut->setConfigurationParameter(QCanBusDevice::RawFilterKey,
++                                            QVariant::fromValue(QList<QCanBusDevice::Filter>{none}));
++        connect(m_canOut, &QCanBusDevice::framesReceived, this, [this]() { m_canOut->readAllFrames(); });
++        if (!m_canOut->connectDevice()) {
++            delete m_canOut;
++            m_canOut = nullptr;
++            return;
++        }
++    }
++    if (m_canOut->state() == QCanBusDevice::ConnectedState)
++        m_canOut->writeFrame(QCanBusFrame(id, payload));
++#endif
+ }
+ 
+ void GPS::initSerialPort()
+@@ -343,6 +442,7 @@ void GPS::processGPRMC(const QString & line) {
+     QString groundspeedknots = fields[7];
+     double speed = groundspeedknots.toDouble() * 1.852; // Convert knots to kph
+     m_dashboard->setgpsSpeed(qRound(speed));  //MLA round speed to the nearest integer
++    sendGpsCan(speed, fields[1], fields[2] == "A");   // CUSTOM FIRMWARE: GPS speed/time on CAN
+ 
+     QString bearing = fields[8];
+     m_dashboard->setgpsbearing(bearing.toDouble());

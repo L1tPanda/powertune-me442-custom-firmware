@@ -1,0 +1,46 @@
+diff --git a/Settings/network.qml b/Settings/network.qml
+index 156aef9..ea1f8d4 100644
+--- a/Settings/network.qml
++++ b/Settings/network.qml
+@@ -185,20 +185,39 @@ Rectangle {
+             }
+         }
+ 
++        // CUSTOM FIRMWARE: warn that the official update replaces this build
++        // (updatePowerTune.sh runs `git reset --hard` on /home/pi/src).
+         Text {
+-            text: " "
++            text: "CUSTOM FW"   // short: a wider label pushes the other labels behind the log box
++            color: "orange"
++            font.bold: true
+             font.pixelSize: extrarect.width / 55
+         }
+         Button {
+             id: updateBtn
+-            text: Translator.translate("Update", Dashboard.language)
++            property bool armed: false
++            text: armed ? "Confirm update?" : Translator.translate("Update", Dashboard.language)
+             width: extrarect.width / 5
+             height: extrarect.height / 15
+             font.pixelSize: extrarect.width / 55
++            // CUSTOM FIRMWARE: first tap arms, second tap within 5 s runs the update
+             onClicked: {
++                if (!armed) {
++                    armed = true
++                    consoleText.append("Custom firmware is loaded. Updating replaces it with the official PowerTune build. Tap Update again within 5 seconds to continue.")
++                    disarmTimer.restart()
++                    return
++                }
++                disarmTimer.stop()
++                armed = false
+                 Connect.update()
+                 updateBtn.enabled = false
+             }
++            Timer {
++                id: disarmTimer
++                interval: 5000
++                onTriggered: updateBtn.armed = false
++            }
+         }
+ 
+         Text {
