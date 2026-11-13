@@ -6,7 +6,9 @@ Patches for the [PowerTune Digital](https://github.com/PowerTuneDigital/PowerTun
 - the dash's GPS speed is sent to the ME442 as its vehicle-speed input (CAN `0x340`), plus a GPS
   speed/time frame (`0x6A0`);
 - a "CUSTOM FW" warning and two-tap confirm on the Update button, because the official updater
-  replaces this build.
+  replaces this build;
+- on-screen buttons that send their state to the ECU on CAN (`0x6A1`), e.g. a map switch that
+  changes colour with the map, and the gear reading showing `N` for neutral.
 
 Unofficial; not affiliated with PowerTune Digital or Motorsport Electronics. Use at your own risk,
 and test on the bench first. Licensed GPL-3, like the PowerTune source it modifies (see `LICENSE`).
@@ -22,6 +24,7 @@ The patches are made against the source the dash had on 2026-10-17
 |---|---|
 | `patches/0001-update-button-custom-firmware-warning.patch` | Settings → Network: orange "CUSTOM FW" next to Update; Update needs a second, separate tap within 5 s. **Tested in the car** (also tested in the emulator) |
 | `patches/0002-gps-speed-time-on-can.patch` | GPS speed to the ME442 on `0x340` (its vehicle-speed input), plus speed + UTC time on `0x6A0`, at the GPS rate (10 Hz). **Road-tested in the car**: the ME442 reads the GPS speed (also tested in the emulator) |
+| `patches/0003-can-buttons-and-gear-n.patch` | "CAN button 1-4" data sources: a State gauge using one becomes a tap-to-toggle button, sent to the ECU on `0x6A1` at 10 Hz. Text labels showing Gear show `N` for 0. **Tested on the dash in the car** (2026-11-08): taps toggle the buttons and `0x6A1` is on the bus (also tested in the emulator) |
 
 `src/` holds the edited files for reading; the patches are what gets applied.
 
@@ -73,3 +76,28 @@ look like the car stopped (gear detection, launch control). Check what the ME442
 
 In emulator builds the patch also takes NMEA from UDP 45455 and prints frames to UDP 45460 instead of can0
 (used with a Windows build of the app for testing; the emulator tools are not in this repo).
+
+## CAN buttons (patch 0003)
+
+On a dash page, add a **State gauge**, set its **Source** to **CAN button 1** (to 4) and pick an OFF and an
+ON picture. Outside edit mode a tap switches it between off and on; the picture follows, and the dash
+sends the state to the ECU. The trigger value is ignored for CAN buttons (ON = 1). Every button is OFF
+when the dash starts. `tools/make_button_images.py` in
+[powertune-page-editor](https://github.com/L1tPanda/powertune-page-editor) makes pill-shaped OFF/ON pictures.
+
+**`0x6A1` - dash buttons** (11-bit id, 8 bytes, 10 Hz and immediately on every tap)
+
+| Byte | Meaning |
+|---|---|
+| 0 | CAN button 1: 0 = off, 1 = on (page 1: map switch, off = MAP 1, on = MAP 2) |
+| 1 | CAN button 2 (page 1: fan override, off = FAN AUTO, on = FAN ON) |
+| 2 / 3 | CAN buttons 3 / 4 |
+| 4-6 | 0 |
+| 7 | counter, +1 every frame (wraps at 255) |
+
+**The ME442 can't read `0x6A1` itself on firmware 4.2.1 (definition 62).** Custom CAN inputs need a
+Gen2B/Gen2D ECU on definition 83 or newer, which isn't published yet; on 4.2.1 the only CAN inputs
+are the fixed presets (e.g. ME1_3) and vehicle speed. Until then, a small CAN relay node (e.g. an ESP32
+board with two relays and a CAN transceiver) can read `0x6A1` and switch the ECU's map-select input
+(Dig In 5, active low) and the fan relay. Make it release both relays if the frame stops for about
+0.5 s, so a dash reboot falls back to map 1 and normal fan control.

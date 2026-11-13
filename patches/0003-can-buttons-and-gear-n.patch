@@ -1,0 +1,323 @@
+diff --git a/Gauges/DatasourcesList.qml b/Gauges/DatasourcesList.qml
+index db2914d..c4bf005 100644
+--- a/Gauges/DatasourcesList.qml
++++ b/Gauges/DatasourcesList.qml
+@@ -11,6 +11,47 @@ Syvecs S7
+ */
+ ListModel {
+     id: datasources
++    // CUSTOM FIRMWARE: on-screen buttons sent to the ECU on CAN (use with a State gauge)
++    ListElement {
++        sourcename:"canbutton1"
++        defaultsymbol: ""
++        titlename:"CAN button 1"
++        decimalpoints : "0"
++        maxvalue : "1"
++        stepsize : "1"
++        divisor : "1"
++        supportedECUs: ""
++    }
++    ListElement {
++        sourcename:"canbutton2"
++        defaultsymbol: ""
++        titlename:"CAN button 2"
++        decimalpoints : "0"
++        maxvalue : "1"
++        stepsize : "1"
++        divisor : "1"
++        supportedECUs: ""
++    }
++    ListElement {
++        sourcename:"canbutton3"
++        defaultsymbol: ""
++        titlename:"CAN button 3"
++        decimalpoints : "0"
++        maxvalue : "1"
++        stepsize : "1"
++        divisor : "1"
++        supportedECUs: ""
++    }
++    ListElement {
++        sourcename:"canbutton4"
++        defaultsymbol: ""
++        titlename:"CAN button 4"
++        decimalpoints : "0"
++        maxvalue : "1"
++        stepsize : "1"
++        divisor : "1"
++        supportedECUs: ""
++    }
+ 
+ 
+ 
+diff --git a/Gauges/MyTextLabel.qml b/Gauges/MyTextLabel.qml
+index 107ea4f..d7d628a 100644
+--- a/Gauges/MyTextLabel.qml
++++ b/Gauges/MyTextLabel.qml
+@@ -344,7 +344,11 @@ Item {
+     function checkdatasource()
+     {
+         if (datasourcename != ""){
+-            if (decimalpoints < 4)
++            if (datasourcename == "Gear")   // CUSTOM FIRMWARE: gear 0 shows as N
++            {
++                changetext.text  = Qt.binding(function(){return Dashboard.Gear < 1 ? "N" : Dashboard.Gear.toFixed(0)});
++            }
++            else if (decimalpoints < 4)
+             {
+                 changetext.text  = Qt.binding(function(){return Dashboard[datasourcename].toFixed(decimalpoints)});
+             }
+diff --git a/Gauges/Statepicture.qml b/Gauges/Statepicture.qml
+index a34e36d..39ed478 100644
+--- a/Gauges/Statepicture.qml
++++ b/Gauges/Statepicture.qml
+@@ -49,6 +49,15 @@ Item {
+             warningindication.warn();
+         }
+     }
++    // CUSTOM FIRMWARE: with source "CAN button N" this state gauge is a button: a tap toggles it
++    // and the dash sends the new state to the ECU on CAN (id 0x6A1, see canbuttons.cpp).
++    MouseArea {
++        id: canButtonArea
++        anchors.fill: parent
++        enabled: Dashboard.draggable !== 1 && isCanButton()
++        onClicked: CanButtons.toggle(parseInt(mainvaluename.substring(9)))
++    }
++
+     // MouseArea {
+     //     id: touchArea
+     //     anchors.fill: parent
+@@ -281,8 +290,10 @@ Item {
+         {
+           //  //console.log("warning" +mainvaluetextfield.text);
+           //  //console.log("Trigger" +mainvaluetextfield.text);
+-            if (mainvaluetextfield.text >= triggervalue ){statepictureoff.visible = false,statepictureon.visible = true}
+-            if (mainvaluetextfield.text < triggervalue ){statepictureoff.visible = true,statepictureon.visible = false}
++            // CUSTOM FIRMWARE: a CAN button is on/off, so show ON at 1 whatever the trigger is set to
++            var trig = isCanButton() ? 1 : triggervalue;
++            if (mainvaluetextfield.text >= trig ){statepictureoff.visible = false,statepictureon.visible = true}
++            if (mainvaluetextfield.text < trig ){statepictureoff.visible = true,statepictureon.visible = false}
+ //            else {statepictureoff.visible = true,statepictureon.visible = false};
+ 
+         }
+@@ -315,9 +326,14 @@ Item {
+         }
+         }
+     }
++    function isCanButton()
++    {
++        return /^canbutton[1-4]$/.test(mainvaluename);
++    }
+     function bind()
+     {
+-        mainvaluetextfield.text = Qt.binding(function(){return Dashboard[mainvaluename]});
++        // CUSTOM FIRMWARE: CAN buttons live in CanButtons, everything else in Dashboard
++        mainvaluetextfield.text = Qt.binding(function(){return isCanButton() ? CanButtons[mainvaluename] : Dashboard[mainvaluename]});
+     }
+ 
+     // These functions update the Picture sources in the ComboBoxes
+diff --git a/PowertuneQMLGui.pro b/PowertuneQMLGui.pro
+index 91602a0..f9042b5 100644
+--- a/PowertuneQMLGui.pro
++++ b/PowertuneQMLGui.pro
+@@ -35,7 +35,8 @@ SOURCES += main.cpp \
+     textprogressbar.cpp \
+     udpreceiver.cpp \
+     arduino.cpp \
+-    wifiscanner.cpp
++    wifiscanner.cpp \
++    canbuttons.cpp
+ 
+ 
+ RESOURCES += qml.qrc
+@@ -66,7 +67,8 @@ HEADERS += \
+     textprogressbar.h \
+     udpreceiver.h \
+     arduino.h \
+-    wifiscanner.h
++    wifiscanner.h \
++    canbuttons.h
+ 
+ 
+ FORMS +=
+diff --git a/canbuttons.cpp b/canbuttons.cpp
+new file mode 100644
+index 0000000..cefb456
+--- /dev/null
++++ b/canbuttons.cpp
+@@ -0,0 +1,95 @@
++#include "canbuttons.h"
++
++#include <QCanBus>
++#include <QCanBusDevice>
++#include <QCanBusFrame>
++#include <QHostAddress>
++#include <QUdpSocket>
++
++// CUSTOM FIRMWARE: dash buttons on CAN.
++//
++// id 0x6A1, 8 bytes, sent 10 times a second and straight away when a button is tapped:
++//   byte 0   CAN button 1 (0 = off, 1 = on)   e.g. map switch: off = map 1, on = map 2
++//   byte 1   CAN button 2
++//   byte 2   CAN button 3
++//   byte 3   CAN button 4
++//   byte 4-6 0
++//   byte 7   counter, +1 every frame (lets the ECU tell the dash is still alive)
++//
++// Every button starts OFF when the dash starts.
++// On the dash the frame goes out on can0; in the Windows emulator it is sent as candump-style
++// text "6A1#..." to UDP 127.0.0.1:45460 (can_monitor.py) and 45461 (fake_me442.py).
++
++CanButtons::CanButtons(QObject *parent) : QObject(parent)
++{
++    connect(&m_timer, &QTimer::timeout, this, &CanButtons::send);
++    m_timer.start(100);
++}
++
++void CanButtons::toggle(int button)
++{
++    if (button >= 1 && button <= Count)
++        set(button, m_state[button - 1] ? 0 : 1);
++}
++
++void CanButtons::set(int button, int on)
++{
++    if (button < 1 || button > Count)
++        return;
++    const int v = on ? 1 : 0;
++    if (m_state[button - 1] == v)
++        return;
++    m_state[button - 1] = v;
++    switch (button) {
++    case 1: emit canbutton1Changed(); break;
++    case 2: emit canbutton2Changed(); break;
++    case 3: emit canbutton3Changed(); break;
++    case 4: emit canbutton4Changed(); break;
++    }
++    send();
++    m_timer.start(100);     // keep an even 10 Hz after the immediate frame
++}
++
++void CanButtons::send()
++{
++    QByteArray p(8, 0);
++    for (int i = 0; i < Count; ++i)
++        p[i] = char(m_state[i]);
++    p[7] = char(m_counter++);
++    sendCanFrame(FrameId, p);
++}
++
++void CanButtons::sendCanFrame(quint32 id, const QByteArray &payload)
++{
++#ifdef Q_OS_WIN
++    if (!m_emuCanOut)
++        m_emuCanOut = new QUdpSocket(this);
++    const QByteArray text = QByteArray::number(id, 16).toUpper().rightJustified(3, '0') + "#" + payload.toHex().toUpper();
++    m_emuCanOut->writeDatagram(text, QHostAddress::LocalHost, 45460);   // can_monitor.py
++    m_emuCanOut->writeDatagram(text, QHostAddress::LocalHost, 45461);   // fake_me442.py (the "ECU")
++#else
++    if (!m_canOut) {
++        QString err;
++        m_canOut = QCanBus::instance()->createDevice("socketcan", "can0", &err);
++        if (!m_canOut)
++            return;                     // try again on the next frame
++        // Send-only: Qt queues every received frame until read, and the ECU sends hundreds a
++        // second. Accept only an extended id nothing uses, and drain whatever still arrives.
++        QCanBusDevice::Filter none;
++        none.frameId = 0x1FFFFFFFu;
++        none.frameIdMask = 0x1FFFFFFFu;
++        none.type = QCanBusFrame::DataFrame;
++        none.format = QCanBusDevice::Filter::MatchExtendedFormat;
++        m_canOut->setConfigurationParameter(QCanBusDevice::RawFilterKey,
++                                            QVariant::fromValue(QList<QCanBusDevice::Filter>{none}));
++        connect(m_canOut, &QCanBusDevice::framesReceived, this, [this]() { m_canOut->readAllFrames(); });
++        if (!m_canOut->connectDevice()) {
++            delete m_canOut;
++            m_canOut = nullptr;
++            return;
++        }
++    }
++    if (m_canOut->state() == QCanBusDevice::ConnectedState)
++        m_canOut->writeFrame(QCanBusFrame(id, payload));
++#endif
++}
+diff --git a/canbuttons.h b/canbuttons.h
+new file mode 100644
+index 0000000..284cbf5
+--- /dev/null
++++ b/canbuttons.h
+@@ -0,0 +1,54 @@
++#ifndef CANBUTTONS_H
++#define CANBUTTONS_H
++
++// CUSTOM FIRMWARE: on-screen buttons that send their state to the ECU on CAN.
++// A "State gauge" on a dash page with source "CAN button 1..4" becomes a toggle button:
++// tap it to switch the button on/off; it shows its OFF / ON picture like any state gauge.
++
++#include <QObject>
++#include <QTimer>
++#include <QByteArray>
++
++class QCanBusDevice;
++class QUdpSocket;
++
++class CanButtons : public QObject
++{
++    Q_OBJECT
++    Q_PROPERTY(int canbutton1 READ canbutton1 NOTIFY canbutton1Changed)
++    Q_PROPERTY(int canbutton2 READ canbutton2 NOTIFY canbutton2Changed)
++    Q_PROPERTY(int canbutton3 READ canbutton3 NOTIFY canbutton3Changed)
++    Q_PROPERTY(int canbutton4 READ canbutton4 NOTIFY canbutton4Changed)
++
++public:
++    static const int Count = 4;
++    static const quint32 FrameId = 0x6A1;
++
++    explicit CanButtons(QObject *parent = nullptr);
++
++    int canbutton1() const { return m_state[0]; }
++    int canbutton2() const { return m_state[1]; }
++    int canbutton3() const { return m_state[2]; }
++    int canbutton4() const { return m_state[3]; }
++
++    Q_INVOKABLE void toggle(int button);          // button 1..4
++    Q_INVOKABLE void set(int button, int on);
++
++signals:
++    void canbutton1Changed();
++    void canbutton2Changed();
++    void canbutton3Changed();
++    void canbutton4Changed();
++
++private:
++    void send();
++    void sendCanFrame(quint32 id, const QByteArray &payload);
++
++    int m_state[Count] = {0, 0, 0, 0};
++    quint8 m_counter = 0;
++    QTimer m_timer;
++    QCanBusDevice *m_canOut = nullptr;
++    QUdpSocket *m_emuCanOut = nullptr;
++};
++
++#endif // CANBUTTONS_H
+diff --git a/main.cpp b/main.cpp
+index 86b191a..28e898c 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -8,6 +8,7 @@
+ #include "iomapdata.h"
+ #include "downloadmanager.h"
+ #include "ptpaths.h"
++#include "canbuttons.h"   // CUSTOM FIRMWARE: dash buttons on CAN
+ #include <QDebug>
+ #include <QDateTime>
+ #include <cstdio>
+@@ -30,6 +31,7 @@ int main(int argc, char *argv[])
+     engine.rootContext()->setContextProperty("DLM", new DownloadManager(&engine));
+     engine.rootContext()->setContextProperty("Connect", new Connect(&engine));
+     engine.rootContext()->setContextProperty("Extender2",new Extender(&engine));
++    engine.rootContext()->setContextProperty("CanButtons", new CanButtons(&engine));   // CUSTOM FIRMWARE
+ 
+     // Base directory for PowerTune data folders (Logo, UserDashboards, maptiles, ...).
+     // Linux -> /home/pi, Windows -> C:/PowerTune. See ptpaths.h.

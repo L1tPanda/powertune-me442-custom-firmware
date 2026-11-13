@@ -31,8 +31,8 @@ for p in "$PATCHES"/*.patch; do
         continue
     fi
     git apply --check "$p" || { log "STOP: $name does not apply"; exit 1; }
-    git apply "$p"
-    $GIT commit -qam "$name"
+    git apply --index "$p"          # --index: also stages files the patch adds
+    $GIT commit -qm "$name"
     log "applied: $name"
 done
 
