@@ -25,6 +25,7 @@ The patches are made against the source the dash had on 2026-10-17
 | `patches/0001-update-button-custom-firmware-warning.patch` | Settings → Network: orange "CUSTOM FW" next to Update; Update needs a second, separate tap within 5 s. **Tested in the car** (also tested in the emulator) |
 | `patches/0002-gps-speed-time-on-can.patch` | GPS speed to the ME442 on `0x340` (its vehicle-speed input), plus speed + UTC time on `0x6A0`, at the GPS rate (10 Hz). **Road-tested in the car**: the ME442 reads the GPS speed (also tested in the emulator) |
 | `patches/0003-can-buttons-and-gear-n.patch` | "CAN button 1-4" data sources: a State gauge using one becomes a tap-to-toggle button, sent to the ECU on `0x6A1` at 10 Hz. Text labels showing Gear show `N` for 0. **Tested on the dash in the car** (2026-11-08): taps toggle the buttons and `0x6A1` is on the bus (also tested in the emulator) |
+| `patches/0004-can-buttons-sync-with-relay-box.patch` | Needs 0003. A CAN relay box keeps the button states (through power cycles) and reports them on `0x6A2`; the dash copies them onto its buttons, so the outputs are right before the dash has booted. Adds "CAN input 1-4" sources: signals the box senses, e.g. whether the ECU is running the fan. **Tested in the emulator** with a fake relay box (2026-11-15): states come back after a dash restart, taps are followed and saved. Not yet on the dash |
 
 `src/` holds the edited files for reading; the patches are what gets applied.
 
@@ -92,12 +93,28 @@ when the dash starts. `tools/make_button_images.py` in
 | 0 | CAN button 1: 0 = off, 1 = on (page 1: map switch, off = MAP 1, on = MAP 2) |
 | 1 | CAN button 2 (page 1: fan override, off = FAN AUTO, on = FAN ON) |
 | 2 / 3 | CAN buttons 3 / 4 |
-| 4-6 | 0 |
+| 4 | bit 0 = 1 once the dash has heard the relay box and shows its states (patch 0004) |
+| 5-6 | 0 |
 | 7 | counter, +1 every frame (wraps at 255) |
+
+**`0x6A2` - relay box to dash** (patch 0004; 11-bit id, 8 bytes, 10 Hz)
+
+| Byte | Meaning |
+|---|---|
+| 0-3 | the button states the box has saved and is driving (0 / 1) |
+| 5 | sensed inputs: bit 0 = "CAN input 1" ... bit 3 = "CAN input 4" |
+| 7 | counter |
+
+With patch 0004 the relay box owns the states. It restores them from its flash and switches its
+outputs as soon as it powers up. The dash sends byte 4 = 0 until it has heard `0x6A2`, and the box
+ignores those frames, so a dash that is still booting (all buttons off) can't undo the saved states.
+Once synced, a tap changes the state and the box follows and saves it. Without a box, the buttons start
+off and work as in 0003. For a "CAN input" indicator, add a State gauge with source **CAN input N**
+(ON when the input is active); inputs read off if the box stops sending for 1 s.
 
 **The ME442 can't read `0x6A1` itself on firmware 4.2.1 (definition 62).** Custom CAN inputs need a
 Gen2B/Gen2D ECU on definition 83 or newer, which isn't published yet; on 4.2.1 the only CAN inputs
 are the fixed presets (e.g. ME1_3) and vehicle speed. Until then, a small CAN relay node (e.g. an ESP32
 board with two relays and a CAN transceiver) can read `0x6A1` and switch the ECU's map-select input
-(Dig In 5, active low) and the fan relay. Make it release both relays if the frame stops for about
-0.5 s, so a dash reboot falls back to map 1 and normal fan control.
+(Dig In 5, active low) and the fan relay. With patch 0004 the box keeps the states itself (see
+`0x6A2` below); with 0003 alone, make it release both relays if the frame stops for about 0.5 s.

@@ -1,0 +1,315 @@
+diff --git a/Gauges/DatasourcesList.qml b/Gauges/DatasourcesList.qml
+index c4bf005..885e27a 100644
+--- a/Gauges/DatasourcesList.qml
++++ b/Gauges/DatasourcesList.qml
+@@ -52,6 +52,47 @@ ListModel {
+         divisor : "1"
+         supportedECUs: ""
+     }
++    // CUSTOM FIRMWARE: signals the CAN relay box senses, e.g. the ECU's fan output (State gauge)
++    ListElement {
++        sourcename:"caninput1"
++        defaultsymbol: ""
++        titlename:"CAN input 1"
++        decimalpoints : "0"
++        maxvalue : "1"
++        stepsize : "1"
++        divisor : "1"
++        supportedECUs: ""
++    }
++    ListElement {
++        sourcename:"caninput2"
++        defaultsymbol: ""
++        titlename:"CAN input 2"
++        decimalpoints : "0"
++        maxvalue : "1"
++        stepsize : "1"
++        divisor : "1"
++        supportedECUs: ""
++    }
++    ListElement {
++        sourcename:"caninput3"
++        defaultsymbol: ""
++        titlename:"CAN input 3"
++        decimalpoints : "0"
++        maxvalue : "1"
++        stepsize : "1"
++        divisor : "1"
++        supportedECUs: ""
++    }
++    ListElement {
++        sourcename:"caninput4"
++        defaultsymbol: ""
++        titlename:"CAN input 4"
++        decimalpoints : "0"
++        maxvalue : "1"
++        stepsize : "1"
++        divisor : "1"
++        supportedECUs: ""
++    }
+ 
+ 
+ 
+diff --git a/Gauges/Statepicture.qml b/Gauges/Statepicture.qml
+index 39ed478..a984176 100644
+--- a/Gauges/Statepicture.qml
++++ b/Gauges/Statepicture.qml
+@@ -291,7 +291,7 @@ Item {
+           //  //console.log("warning" +mainvaluetextfield.text);
+           //  //console.log("Trigger" +mainvaluetextfield.text);
+             // CUSTOM FIRMWARE: a CAN button is on/off, so show ON at 1 whatever the trigger is set to
+-            var trig = isCanButton() ? 1 : triggervalue;
++            var trig = (isCanButton() || isCanInput()) ? 1 : triggervalue;
+             if (mainvaluetextfield.text >= trig ){statepictureoff.visible = false,statepictureon.visible = true}
+             if (mainvaluetextfield.text < trig ){statepictureoff.visible = true,statepictureon.visible = false}
+ //            else {statepictureoff.visible = true,statepictureon.visible = false};
+@@ -330,10 +330,15 @@ Item {
+     {
+         return /^canbutton[1-4]$/.test(mainvaluename);
+     }
++    function isCanInput()
++    {
++        // CUSTOM FIRMWARE: "CAN input N" = a signal the CAN relay box senses (e.g. the ECU's fan output)
++        return /^caninput[1-4]$/.test(mainvaluename);
++    }
+     function bind()
+     {
+         // CUSTOM FIRMWARE: CAN buttons live in CanButtons, everything else in Dashboard
+-        mainvaluetextfield.text = Qt.binding(function(){return isCanButton() ? CanButtons[mainvaluename] : Dashboard[mainvaluename]});
++        mainvaluetextfield.text = Qt.binding(function(){return (isCanButton() || isCanInput()) ? CanButtons[mainvaluename] : Dashboard[mainvaluename]});
+     }
+ 
+     // These functions update the Picture sources in the ComboBoxes
+diff --git a/canbuttons.cpp b/canbuttons.cpp
+index cefb456..12bad87 100644
+--- a/canbuttons.cpp
++++ b/canbuttons.cpp
+@@ -8,22 +8,37 @@
+ 
+ // CUSTOM FIRMWARE: dash buttons on CAN.
+ //
+-// id 0x6A1, 8 bytes, sent 10 times a second and straight away when a button is tapped:
++// id 0x6A1 (dash -> bus), 8 bytes, sent 10 times a second and straight away when a button is tapped:
+ //   byte 0   CAN button 1 (0 = off, 1 = on)   e.g. map switch: off = map 1, on = map 2
+ //   byte 1   CAN button 2
+ //   byte 2   CAN button 3
+ //   byte 3   CAN button 4
+-//   byte 4-6 0
+-//   byte 7   counter, +1 every frame (lets the ECU tell the dash is still alive)
++//   byte 4   bit 0 = 1 once the dash has heard the relay box (0x6A2) and shows its states
++//   byte 5-6 0
++//   byte 7   counter, +1 every frame (lets a receiver tell the dash is still alive)
+ //
+-// Every button starts OFF when the dash starts.
+-// On the dash the frame goes out on can0; in the Windows emulator it is sent as candump-style
+-// text "6A1#..." to UDP 127.0.0.1:45460 (can_monitor.py) and 45461 (fake_me442.py).
++// id 0x6A2 (relay box -> dash), 10 Hz: bytes 0-3 = the states the box has saved and is driving,
++// byte 5 = what the box senses on its inputs (bit 0 = "CAN input 1" ... bit 3 = input 4), e.g. whether
++// the ECU is running the fan. The inputs read 0 if no 0x6A2 arrives for 1 s.
++// The box keeps its states through a power cycle and switches its outputs as soon as it powers up,
++// long before the dash has booted. Until the dash has heard 0x6A2 it sends byte 4 = 0 and the box
++// ignores it, so the dash starting up with every button off can't undo the saved states. Once
++// synced, a tap on the dash changes the state and the box follows (and saves it). Without a box,
++// the buttons start off and work as before.
++//
++// On the dash the frames use can0. In the Windows emulator 0x6A1 goes out as candump-style text
++// "6A1#..." to UDP 127.0.0.1:45460 (can_monitor.py), 45461 (fake_me442.py) and 45463
++// (fake_relay_box.py), and "6A2#..." is read from UDP 45462 (from fake_relay_box.py).
+ 
+ CanButtons::CanButtons(QObject *parent) : QObject(parent)
+ {
+     connect(&m_timer, &QTimer::timeout, this, &CanButtons::send);
+     m_timer.start(100);
++#ifdef Q_OS_WIN
++    m_emuCanIn = new QUdpSocket(this);
++    if (m_emuCanIn->bind(QHostAddress::LocalHost, 45462))
++        connect(m_emuCanIn, &QUdpSocket::readyRead, this, &CanButtons::readEmuFrames);
++#endif
+ }
+ 
+ void CanButtons::toggle(int button)
+@@ -39,26 +54,68 @@ void CanButtons::set(int button, int on)
+     const int v = on ? 1 : 0;
+     if (m_state[button - 1] == v)
+         return;
+-    m_state[button - 1] = v;
+-    switch (button) {
+-    case 1: emit canbutton1Changed(); break;
+-    case 2: emit canbutton2Changed(); break;
+-    case 3: emit canbutton3Changed(); break;
+-    case 4: emit canbutton4Changed(); break;
+-    }
++    m_lastTap.start();
++    setState(button - 1, v);
+     send();
+     m_timer.start(100);     // keep an even 10 Hz after the immediate frame
+ }
+ 
++void CanButtons::setState(int index, int v)
++{
++    if (m_state[index] == v)
++        return;
++    m_state[index] = v;
++    switch (index) {
++    case 0: emit canbutton1Changed(); break;
++    case 1: emit canbutton2Changed(); break;
++    case 2: emit canbutton3Changed(); break;
++    case 3: emit canbutton4Changed(); break;
++    }
++}
++
++void CanButtons::boxFrame(const QByteArray &payload)
++{
++    if (payload.size() < Count)
++        return;
++    m_lastBox.start();
++    const int in = payload.size() > 5 ? (quint8(payload.at(5)) & 0x0F) : 0;
++    if (in != m_input) {
++        m_input = in;
++        emit caninputsChanged();
++    }
++    // Just after a tap the box may still report the old state for a frame or two; don't flick back.
++    if (m_lastTap.isValid() && m_lastTap.elapsed() < 500)
++        return;
++    for (int i = 0; i < Count; ++i)
++        setState(i, payload.at(i) ? 1 : 0);
++    m_synced = true;
++}
++
+ void CanButtons::send()
+ {
++    if (m_input && m_lastBox.isValid() && m_lastBox.elapsed() > 1000) {
++        m_input = 0;                            // box gone quiet: don't show stale inputs
++        emit caninputsChanged();
++    }
+     QByteArray p(8, 0);
+     for (int i = 0; i < Count; ++i)
+         p[i] = char(m_state[i]);
++    p[4] = char(m_synced ? 1 : 0);
+     p[7] = char(m_counter++);
+     sendCanFrame(FrameId, p);
+ }
+ 
++void CanButtons::readEmuFrames()
++{
++    while (m_emuCanIn && m_emuCanIn->hasPendingDatagrams()) {
++        QByteArray d(int(m_emuCanIn->pendingDatagramSize()), 0);
++        m_emuCanIn->readDatagram(d.data(), d.size());
++        const int hash = d.indexOf('#');
++        if (hash > 0 && d.left(hash).trimmed().toUInt(nullptr, 16) == BoxFrameId)
++            boxFrame(QByteArray::fromHex(d.mid(hash + 1).trimmed()));
++    }
++}
++
+ void CanButtons::sendCanFrame(quint32 id, const QByteArray &payload)
+ {
+ #ifdef Q_OS_WIN
+@@ -67,22 +124,28 @@ void CanButtons::sendCanFrame(quint32 id, const QByteArray &payload)
+     const QByteArray text = QByteArray::number(id, 16).toUpper().rightJustified(3, '0') + "#" + payload.toHex().toUpper();
+     m_emuCanOut->writeDatagram(text, QHostAddress::LocalHost, 45460);   // can_monitor.py
+     m_emuCanOut->writeDatagram(text, QHostAddress::LocalHost, 45461);   // fake_me442.py (the "ECU")
++    m_emuCanOut->writeDatagram(text, QHostAddress::LocalHost, 45463);   // fake_relay_box.py
+ #else
+     if (!m_canOut) {
+         QString err;
+         m_canOut = QCanBus::instance()->createDevice("socketcan", "can0", &err);
+         if (!m_canOut)
+             return;                     // try again on the next frame
+-        // Send-only: Qt queues every received frame until read, and the ECU sends hundreds a
+-        // second. Accept only an extended id nothing uses, and drain whatever still arrives.
+-        QCanBusDevice::Filter none;
+-        none.frameId = 0x1FFFFFFFu;
+-        none.frameIdMask = 0x1FFFFFFFu;
+-        none.type = QCanBusFrame::DataFrame;
+-        none.format = QCanBusDevice::Filter::MatchExtendedFormat;
++        // Qt queues every received frame until read, and the ECU sends hundreds a second.
++        // Let the kernel pass only the relay box's 0x6A2, and read whatever arrives.
++        QCanBusDevice::Filter box;
++        box.frameId = BoxFrameId;
++        box.frameIdMask = 0x7FFu;
++        box.type = QCanBusFrame::DataFrame;
++        box.format = QCanBusDevice::Filter::MatchBaseFormat;
+         m_canOut->setConfigurationParameter(QCanBusDevice::RawFilterKey,
+-                                            QVariant::fromValue(QList<QCanBusDevice::Filter>{none}));
+-        connect(m_canOut, &QCanBusDevice::framesReceived, this, [this]() { m_canOut->readAllFrames(); });
++                                            QVariant::fromValue(QList<QCanBusDevice::Filter>{box}));
++        connect(m_canOut, &QCanBusDevice::framesReceived, this, [this]() {
++            const QVector<QCanBusFrame> frames = m_canOut->readAllFrames();
++            for (const QCanBusFrame &f : frames)
++                if (f.frameId() == BoxFrameId && f.frameType() == QCanBusFrame::DataFrame)
++                    boxFrame(f.payload());
++        });
+         if (!m_canOut->connectDevice()) {
+             delete m_canOut;
+             m_canOut = nullptr;
+diff --git a/canbuttons.h b/canbuttons.h
+index 284cbf5..6795802 100644
+--- a/canbuttons.h
++++ b/canbuttons.h
+@@ -4,10 +4,12 @@
+ // CUSTOM FIRMWARE: on-screen buttons that send their state to the ECU on CAN.
+ // A "State gauge" on a dash page with source "CAN button 1..4" becomes a toggle button:
+ // tap it to switch the button on/off; it shows its OFF / ON picture like any state gauge.
++// When a CAN relay box is on the bus, the box keeps the states and the dash shows the box's.
+ 
+ #include <QObject>
+ #include <QTimer>
+ #include <QByteArray>
++#include <QElapsedTimer>
+ 
+ class QCanBusDevice;
+ class QUdpSocket;
+@@ -19,10 +21,15 @@ class CanButtons : public QObject
+     Q_PROPERTY(int canbutton2 READ canbutton2 NOTIFY canbutton2Changed)
+     Q_PROPERTY(int canbutton3 READ canbutton3 NOTIFY canbutton3Changed)
+     Q_PROPERTY(int canbutton4 READ canbutton4 NOTIFY canbutton4Changed)
++    Q_PROPERTY(int caninput1 READ caninput1 NOTIFY caninputsChanged)
++    Q_PROPERTY(int caninput2 READ caninput2 NOTIFY caninputsChanged)
++    Q_PROPERTY(int caninput3 READ caninput3 NOTIFY caninputsChanged)
++    Q_PROPERTY(int caninput4 READ caninput4 NOTIFY caninputsChanged)
+ 
+ public:
+     static const int Count = 4;
+-    static const quint32 FrameId = 0x6A1;
++    static const quint32 FrameId = 0x6A1;       // dash -> bus: button states
++    static const quint32 BoxFrameId = 0x6A2;    // relay box -> dash: the box's saved states
+ 
+     explicit CanButtons(QObject *parent = nullptr);
+ 
+@@ -30,6 +37,10 @@ public:
+     int canbutton2() const { return m_state[1]; }
+     int canbutton3() const { return m_state[2]; }
+     int canbutton4() const { return m_state[3]; }
++    int caninput1() const { return m_input & 1 ? 1 : 0; }   // sensed by the relay box (0x6A2 byte 5)
++    int caninput2() const { return m_input & 2 ? 1 : 0; }
++    int caninput3() const { return m_input & 4 ? 1 : 0; }
++    int caninput4() const { return m_input & 8 ? 1 : 0; }
+ 
+     Q_INVOKABLE void toggle(int button);          // button 1..4
+     Q_INVOKABLE void set(int button, int on);
+@@ -39,16 +50,25 @@ signals:
+     void canbutton2Changed();
+     void canbutton3Changed();
+     void canbutton4Changed();
++    void caninputsChanged();
+ 
+ private:
+     void send();
+     void sendCanFrame(quint32 id, const QByteArray &payload);
++    void boxFrame(const QByteArray &payload);
++    void setState(int index, int v);
++    void readEmuFrames();
+ 
+     int m_state[Count] = {0, 0, 0, 0};
++    bool m_synced = false;          // heard the relay box at least once
++    QElapsedTimer m_lastTap;        // ignore the box's echo for a moment after a tap
++    QElapsedTimer m_lastBox;        // last 0x6A2; inputs read 0 if the box goes quiet
++    int m_input = 0;                // sensed inputs, bit 0 = CAN input 1
+     quint8 m_counter = 0;
+     QTimer m_timer;
+     QCanBusDevice *m_canOut = nullptr;
+     QUdpSocket *m_emuCanOut = nullptr;
++    QUdpSocket *m_emuCanIn = nullptr;
+ };
+ 
+ #endif // CANBUTTONS_H

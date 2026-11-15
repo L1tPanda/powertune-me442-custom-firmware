@@ -291,7 +291,7 @@ Item {
           //  //console.log("warning" +mainvaluetextfield.text);
           //  //console.log("Trigger" +mainvaluetextfield.text);
             // CUSTOM FIRMWARE: a CAN button is on/off, so show ON at 1 whatever the trigger is set to
-            var trig = isCanButton() ? 1 : triggervalue;
+            var trig = (isCanButton() || isCanInput()) ? 1 : triggervalue;
             if (mainvaluetextfield.text >= trig ){statepictureoff.visible = false,statepictureon.visible = true}
             if (mainvaluetextfield.text < trig ){statepictureoff.visible = true,statepictureon.visible = false}
 //            else {statepictureoff.visible = true,statepictureon.visible = false};
@@ -330,10 +330,15 @@ Item {
     {
         return /^canbutton[1-4]$/.test(mainvaluename);
     }
+    function isCanInput()
+    {
+        // CUSTOM FIRMWARE: "CAN input N" = a signal the CAN relay box senses (e.g. the ECU's fan output)
+        return /^caninput[1-4]$/.test(mainvaluename);
+    }
     function bind()
     {
         // CUSTOM FIRMWARE: CAN buttons live in CanButtons, everything else in Dashboard
-        mainvaluetextfield.text = Qt.binding(function(){return isCanButton() ? CanButtons[mainvaluename] : Dashboard[mainvaluename]});
+        mainvaluetextfield.text = Qt.binding(function(){return (isCanButton() || isCanInput()) ? CanButtons[mainvaluename] : Dashboard[mainvaluename]});
     }
 
     // These functions update the Picture sources in the ComboBoxes
